@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import sys
@@ -67,6 +68,11 @@ def _log(event: str, **fields: Any) -> None:
     }
     line = json.dumps(row, separators=(",", ":"))
     print(line, flush=True)
+    try:
+        with paths.manager_log_path().open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except OSError:
+        pass
 
 
 def _load_state() -> Dict[str, Any]:
@@ -303,16 +309,33 @@ def tick(client: HookClient, state: Dict[str, Any]) -> List[Dict[str, Any]]:
     return snaps
 
 
-def run(interval: int = 20, caffeinate: bool = False) -> None:
-    if caffeinate and sys.platform == "darwin" and os.environ.get("MT5_MANAGER_CAFFEINATED") != "1":
+def _prevent_idle_sleep() -> None:
+    if sys.platform != "win32":
+        return
+    # Keep the machine from sleeping while this process is alive.
+    es_continuous = 0x80000000
+    es_system_required = 0x00000001
+    ctypes.windll.kernel32.SetThreadExecutionState(es_continuous | es_system_required)
+
+
+def run(interval: int = 20, prevent_sleep: bool = False, caffeinate: bool = False) -> None:
+    prevent_sleep = prevent_sleep or caffeinate
+    if prevent_sleep and sys.platform == "darwin" and os.environ.get("MT5_MANAGER_CAFFEINATED") != "1":
         os.environ["MT5_MANAGER_CAFFEINATED"] = "1"
-        os.execvp("caffeinate", ["caffeinate", "-i", sys.executable, "-m", "mt5_hook", "manage", "--interval", str(interval)])
+        os.execvp(
+            "caffeinate",
+            ["caffeinate", "-i", sys.executable, "-m", "mt5_hook", "manage", "--interval", str(interval), "--no-sleep"],
+        )
+    if prevent_sleep:
+        _prevent_idle_sleep()
 
     client = HookClient()
     state = _load_state()
     cfg = load_enabled()
-    _log("manager_start", interval=interval, pid=os.getpid(), enabled=cfg["enabled"])
+    _log("manager_start", interval=interval, pid=os.getpid(), enabled=cfg["enabled"], prevent_sleep=prevent_sleep)
     while True:
+        if prevent_sleep:
+            _prevent_idle_sleep()
         try:
             tick(client, state)
         except HookError as exc:

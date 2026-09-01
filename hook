@@ -1,5 +1,16 @@
 #!/usr/bin/env bash
+# OS-aware launcher. Python auto-detects Windows vs macOS for paths, install, and the daemon.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-export PYTHONPATH="${ROOT}/python${PYTHONPATH:+:$PYTHONPATH}"
-exec python3 -m mt5_hook "$@"
+if [[ "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* || -n "${WINDIR:-}" ]]; then
+  export PYTHONPATH="${ROOT}/python${PYTHONPATH:+;$PYTHONPATH}"
+  PY=python
+else
+  export PYTHONPATH="${ROOT}/python${PYTHONPATH:+:$PYTHONPATH}"
+  if command -v python3 >/dev/null 2>&1; then
+    PY=python3
+  else
+    PY=python
+  fi
+fi
+exec "$PY" -m mt5_hook "$@"

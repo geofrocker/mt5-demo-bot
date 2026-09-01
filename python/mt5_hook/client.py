@@ -39,7 +39,7 @@ class HookClient:
         if not common.exists():
             raise HookError(
                 f"MetaTrader 5 Common Files not found at {common}. "
-                "Install MT5 and log into a demo account first."
+                f"Install MT5, log into a demo account, then run {paths.hook_command()} install."
             )
         hint = f" on {symbol}" if symbol else ""
         raise HookError(
@@ -238,7 +238,7 @@ class HookClient:
         if not common.exists():
             raise HookError(
                 f"MT5 Common Files folder not found at {common}. "
-                "Install MetaTrader 5 and log into a demo account first."
+                f"Install MetaTrader 5, log into a demo account, then run {paths.hook_command()} install."
             )
 
         cmd_file = paths.cmd_path(symbol)

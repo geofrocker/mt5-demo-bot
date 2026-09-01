@@ -35,11 +35,14 @@ def main(argv: list[str] | None = None) -> int:
     with_symbol(sub.add_parser("resume", help="Allow entries again"))
     with_symbol(sub.add_parser("close-all", help="Close hook-managed positions on that chart"))
     sub.add_parser("scan", help="Walk-forward majors and rewrite config/enabled.json")
+    sub.add_parser("paths", help="Show MT5 Common Files and data-folder paths")
+    sub.add_parser("install", help="Copy and compile PythonBridgeEA into the local MT5 data folder")
     manage = sub.add_parser("manage", help="Run the 24/7 manager in the foreground")
     manage.add_argument("--interval", type=int, default=20, help="seconds between ticks")
-    manage.add_argument("--caffeinate", action="store_true", help="prevent idle sleep (macOS)")
-    sub.add_parser("daemon-install", help="Install a LaunchAgent that keeps the manager running")
-    sub.add_parser("daemon-uninstall", help="Remove the LaunchAgent")
+    manage.add_argument("--no-sleep", action="store_true", help="prevent idle sleep (caffeinate on macOS, SetThreadExecutionState on Windows)")
+    manage.add_argument("--caffeinate", action="store_true", help="alias for --no-sleep")
+    sub.add_parser("daemon-install", help="Install a login task (Task Scheduler on Windows, LaunchAgent on macOS)")
+    sub.add_parser("daemon-uninstall", help="Remove the background manager task")
 
     buy = sub.add_parser("buy", help="Open a buy")
     sell = sub.add_parser("sell", help="Open a sell")
@@ -68,6 +71,15 @@ def main(argv: list[str] | None = None) -> int:
 
         serve()
         return 0
+    if args.cmd == "paths":
+        from . import paths
+
+        print(json.dumps(paths.describe(), indent=2))
+        return 0
+    if args.cmd == "install":
+        from .install import install
+
+        return install()
     if args.cmd == "scan":
         from majors import scan
 
@@ -76,17 +88,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "manage":
         from .manager import run
 
-        run(interval=args.interval, caffeinate=args.caffeinate)
+        run(interval=args.interval, prevent_sleep=bool(args.no_sleep or args.caffeinate))
         return 0
     if args.cmd == "daemon-install":
-        from . import launchd
+        from . import daemon
 
-        launchd.install()
+        try:
+            daemon.install()
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
         return 0
     if args.cmd == "daemon-uninstall":
-        from . import launchd
+        from . import daemon
 
-        launchd.uninstall()
+        daemon.uninstall()
         return 0
 
     client = HookClient()
