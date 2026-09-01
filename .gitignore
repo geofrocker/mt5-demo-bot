@@ -1,0 +1,16 @@
+# Compiled Expert Advisors
+*.ex5
+*.ex4
+
+# MetaEditor / terminal junk
+*.log
+*.bak
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.hook_token
+logs/*.log
+logs/*.json

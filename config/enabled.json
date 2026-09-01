@@ -1,0 +1,42 @@
+{
+  "strategy": "er_ema50_h4",
+  "updated": "2026-09-01T13:20:47Z",
+  "gates": {
+    "is_pnl": 0.0,
+    "oos_pnl": 0.0,
+    "oos_pf": 1.2,
+    "oos_n": 10,
+    "full_n": 20,
+    "oos_dd": 15.0
+  },
+  "risk_percent": 0.5,
+  "max_positions": 3,
+  "max_usd_dir": 2,
+  "enabled": [
+    "EURUSD",
+    "USDCAD",
+    "EURJPY"
+  ],
+  "rejected": [
+    {
+      "symbol": "GBPUSD",
+      "reason": "IS PnL -242.16"
+    },
+    {
+      "symbol": "USDJPY",
+      "reason": "IS PnL -67.67"
+    },
+    {
+      "symbol": "AUDUSD",
+      "reason": "OOS PnL -21.45"
+    },
+    {
+      "symbol": "USDCHF",
+      "reason": "IS PnL -536.08"
+    },
+    {
+      "symbol": "NZDUSD",
+      "reason": "OOS PF 1.1"
+    }
+  ]
+}
