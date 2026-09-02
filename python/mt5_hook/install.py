@@ -93,8 +93,7 @@ def install() -> int:
 
     print()
     print("In MT5: Navigator -> Expert Advisors -> Refresh,")
-    print("reattach PythonBridgeEA on each enabled-symbol H4 chart, enable Algo Trading.")
-    print("Leave EnableTcp=false when more than one chart is attached.")
-    print("Do not attach ConservativeTrendEA at the same time.")
+    print("reattach PythonBridgeEA on each enabled-symbol H4 chart so HUD v1.14 loads, enable Algo Trading.")
+    print("Leave AutoTrade=true, RiskPercent=1.0, RewardRatio=2.0. Leave EnableTcp=false when more than one chart is attached.")
     print(f"Installed into {copied} terminal(s); compiled {compiled}.")
     return 0 if copied else 1

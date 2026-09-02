@@ -128,7 +128,9 @@ def er_trend(bars, n=10, er_min=0.4):
         er[i] = change / vol if vol else 0.0
 
     def sig(i):
-        if e50[i] is None or er[i] is None or a[i] is None:
+        if i < 1:
+            return None
+        if e50[i] is None or e50[i - 1] is None or er[i] is None or a[i] is None:
             return None
         if er[i] < er_min:
             return None
@@ -138,7 +140,7 @@ def er_trend(bars, n=10, er_min=0.4):
             return "sell"
         return None
 
-    return sig, {"atr": a, "atr_stop": 2.5, "reward": 2.0, "max_day": 1}
+    return sig, {"atr": a, "atr_stop": 2.5, "reward": 2.0, "trail_atr": 0.0, "max_day": 1}
 
 
 def supertrend(h, l, c, atr_v, mult=3.0):
@@ -166,17 +168,26 @@ def supertrend(h, l, c, atr_v, mult=3.0):
     return st, dirn
 
 
-def lots(equity, sl_dist, pip=0.0001):
-    risk = equity * 0.005
+def lots(
+    equity,
+    sl_dist,
+    pip=0.0001,
+    risk_percent: float = 0.5,
+    pip_value: float = 10.0,
+    min_lot: float = 0.01,
+    max_lot: float = 0.10,
+    step: float = 0.01,
+):
+    risk = equity * (risk_percent / 100.0)
     pips = sl_dist / pip
-    if pips <= 0:
+    if pips <= 0 or pip_value <= 0 or step <= 0:
         return 0.0
-    raw = risk / (pips * 10.0)
-    x = math.floor(raw / 0.01) * 0.01
-    x = max(0.01, min(0.10, x))
-    if 0.01 * pips * 10 > risk * 1.5:
+    raw = risk / (pips * pip_value)
+    x = math.floor(raw / step + 1e-12) * step
+    x = max(min_lot, min(max_lot, x))
+    if min_lot * pips * pip_value > risk * 1.5:
         return 0.0
-    return x
+    return round(x, 8)
 
 
 @dataclass
@@ -233,7 +244,13 @@ def simulate(bars: List[Bar], tf: str, warmup: int, signal_fn, cfg: dict) -> dic
     time_stop = cfg.get("time_stop", 0)
     opposite_exit = cfg.get("opposite_exit", False)
     atr_v = cfg.get("atr")
-    pip = 0.01 if (max(c) > 20) else 0.0001  # JPY pairs
+    pip = cfg.get("pip")
+    if pip is None:
+        pip = 0.01 if (max(c) > 20) else 0.0001
+    pip_value = float(cfg.get("pip_value") or 10.0)
+    min_lot = float(cfg.get("min_lot") or 0.01)
+    max_lot = float(cfg.get("max_lot") or 0.10)
+    step = float(cfg.get("lot_step") or 0.01)
 
     def sl_dist(i):
         a = atr_v[i] if atr_v and atr_v[i] else (h[i] - l[i])
@@ -247,7 +264,7 @@ def simulate(bars: List[Bar], tf: str, warmup: int, signal_fn, cfg: dict) -> dic
             side, entry, sl, tp, vol, bars_held = pos["side"], pos["entry"], pos["sl"], pos["tp"], pos["lots"], pos["held"]
             hi, lo = h[i], l[i]
             exit_px = reason = None
-            if trail and atr_v and atr_v[i]:
+            if trail and atr_v and atr_v[i] and str(cfg.get("trail_mode") or "") != "chandelier":
                 if side == "buy":
                     pos["sl"] = max(pos["sl"], c[i] - trail * atr_v[i])
                 else:
@@ -276,12 +293,21 @@ def simulate(bars: List[Bar], tf: str, warmup: int, signal_fn, cfg: dict) -> dic
                     exit_px, reason = c[i], "flip"
             if exit_px is not None:
                 signed = (exit_px - entry) if side == "buy" else (entry - exit_px)
-                pnl = (signed / pip) * vol * 10.0
+                pnl = (signed / pip) * vol * pip_value
                 equity += pnl
                 trades.append(Trade(side, pos["tm"], t[i].strftime("%Y-%m-%d %H:%M"), round(pnl, 2), reason))
                 pos = None
                 peak = max(peak, equity)
                 dd = max(dd, (peak - equity) / peak * 100)
+            elif str(cfg.get("trail_mode") or "") == "chandelier" and trail:
+                a_now = atr_v[i] if atr_v and atr_v[i] else None
+                if a_now:
+                    if side == "buy":
+                        pos["peak"] = max(float(pos.get("peak") or entry), h[i])
+                        pos["sl"] = max(sl, pos["peak"] - trail * a_now)
+                    else:
+                        pos["trough"] = min(float(pos.get("trough") or entry), l[i])
+                        pos["sl"] = min(sl, pos["trough"] + trail * a_now)
         if pos:
             continue
         if day_count >= max_day:
@@ -291,7 +317,16 @@ def simulate(bars: List[Bar], tf: str, warmup: int, signal_fn, cfg: dict) -> dic
         if side not in ("buy", "sell"):
             continue
         dist = sl_dist(sig_i)
-        vol = lots(equity, dist, pip)
+        vol = lots(
+            equity,
+            dist,
+            pip,
+            risk_percent=float(cfg.get("risk_percent", 0.5)),
+            pip_value=pip_value,
+            min_lot=min_lot,
+            max_lot=max_lot,
+            step=step,
+        )
         if vol <= 0:
             continue
         entry = o[i] + spread / 2 if side == "buy" else o[i] - spread / 2
@@ -299,7 +334,7 @@ def simulate(bars: List[Bar], tf: str, warmup: int, signal_fn, cfg: dict) -> dic
         tp = (entry + dist * reward) if (side == "buy" and reward) else ((entry - dist * reward) if reward else None)
         if side == "sell" and reward:
             tp = entry - dist * reward
-        pos = {"side": side, "entry": entry, "sl": sl, "tp": tp, "lots": vol, "held": 0, "tm": t[i].strftime("%Y-%m-%d %H:%M")}
+        pos = {"side": side, "entry": entry, "sl": sl, "tp": tp, "lots": vol, "held": 0, "tm": t[i].strftime("%Y-%m-%d %H:%M"), "peak": entry, "trough": entry}
         day_count += 1
     return summarize(cfg.get("name", "?"), trades, equity, dd, len(bars) - warmup, tf), trades
 

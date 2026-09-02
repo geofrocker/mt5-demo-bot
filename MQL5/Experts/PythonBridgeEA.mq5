@@ -4,8 +4,8 @@
 //| Not financial advice. No martingale / grid / averaging.          |
 //+------------------------------------------------------------------+
 #property copyright "mt5-demo-bot"
-#property version   "1.05"
-#property description "Python hook + Kaufman ER / EMA50 H4 trend. Per-symbol files. Demo only."
+#property version   "1.14"
+#property description "Autonomous Kaufman ER / EMA50 H4 trend. Fixed 2R target. On-chart HUD."
 
 #include <Trade/Trade.mqh>
 
@@ -26,14 +26,21 @@ input int    SlippagePoints       = 20;
 input int    MagicNumber          = 260902;
 input bool   AllowLive            = false;  // leave false
 
+input group "=== Autonomous ==="
+input bool   AutoTrade            = true;   // EA entries + exits; do not also run the Python manager
+input double RiskPercent          = 1.0;
+input int    MaxUsdDir            = 2;      // max same-way USD bets across magic positions
+input int    MaxTradesPerDay      = 1;
+
 input group "=== Signal (Kaufman ER + EMA50 on H4) ==="
 input ENUM_TIMEFRAMES SignalTF    = PERIOD_H4;
 input int    ErPeriod             = 10;
 input double ErMin                = 0.40;
 input int    TrendEMA             = 50;
 input int    ATRPeriod            = 14;
-input double ATRStopMult          = 2.5;
-input double RewardRatio          = 2.0;
+input double ATRStopMult          = 2.5;    // initial stop distance
+input double RewardRatio          = 2.0;    // take-profit in R (0 = no TP)
+input bool   ShowEmaOnChart       = true;   // plot the signal EMA50 on this chart
 
 CTrade   trade;
 int      tcpSock = INVALID_HANDLE;
@@ -47,6 +54,11 @@ string   lastStatus = "starting";
 string   lastResult = "";
 int      trendHandle = INVALID_HANDLE;
 int      atrHandle  = INVALID_HANDLE;
+datetime lastBarTime = 0;
+datetime emaBarStamp = 0;
+
+void SignalCloseness(double &frac, string &text, color &fill, color &labelClr);
+bool H4Values(double &ema50, double &ema50Prev, double &closeNow, double &closePrev, double &atr, double &er, datetime &barTime);
 
 int OnInit()
   {
@@ -63,8 +75,8 @@ int OnInit()
    atrHandle   = iATR(_Symbol, SignalTF, ATRPeriod);
    ResetDailyCounters();
    EventSetMillisecondTimer(200);
-   lastStatus = "waiting for python";
-   Print("PythonBridgeEA ready. Files ", HookPrefix(), "  TCP ", EnableTcp);
+   lastStatus = AutoTrade ? "autotrade on" : "hook only";
+   Print("PythonBridgeEA ready. AutoTrade=", AutoTrade, " files ", HookPrefix(), " TCP ", EnableTcp);
    return INIT_SUCCEEDED;
   }
 
@@ -72,6 +84,11 @@ void OnDeinit(const int reason)
   {
    EventKillTimer();
    CloseTcp();
+   Comment("");
+   ObjectsDeleteAll(0, "PBHUD_");
+   ObjectsDeleteAll(0, "PBLINE_");
+   ObjectsDeleteAll(0, "PBEMA_");
+   ChartRedraw(0);
    if(trendHandle != INVALID_HANDLE) IndicatorRelease(trendHandle);
    if(atrHandle   != INVALID_HANDLE) IndicatorRelease(atrHandle);
   }
@@ -86,13 +103,235 @@ void OnTimer()
    BridgePump();
   }
 
+void HudLabel(const string name, const int x, const int y, const int size, const color clr)
+  {
+   if(ObjectFind(0, name) < 0)
+     {
+      ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+      ObjectSetString(0, name, OBJPROP_FONT, "Consolas");
+     }
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, size);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+  }
+
+void HudRect(const string name, const int x, const int y, const int w, const int h, const color fill)
+  {
+   if(ObjectFind(0, name) < 0)
+     {
+      ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+      ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, name, OBJPROP_BACK, false);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+     }
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, name, OBJPROP_XSIZE, MathMax(w, 1));
+   ObjectSetInteger(0, name, OBJPROP_YSIZE, MathMax(h, 1));
+   ObjectSetInteger(0, name, OBJPROP_BGCOLOR, fill);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, fill);
+  }
+
+void HudMeter(const string prefix, const int x, const int y, const int w, const int h,
+              const double frac, const double gate, const color fill)
+  {
+   const double f = MathMax(0.0, MathMin(1.0, frac));
+   HudRect(prefix + "_TR", x, y, w, h, C'40,40,46');
+   ObjectSetInteger(0, prefix + "_TR", OBJPROP_ZORDER, 0);
+   const int fw = (int)MathRound(w * f);
+   if(fw < 1)
+      ObjectDelete(0, prefix + "_FL");
+   else
+     {
+      HudRect(prefix + "_FL", x, y, fw, h, fill);
+      ObjectSetInteger(0, prefix + "_FL", OBJPROP_ZORDER, 1);
+     }
+   if(gate > 0.0 && gate < 1.0)
+     {
+      const int gx = x + (int)MathRound(w * gate);
+      HudRect(prefix + "_GT", gx, y - 1, 2, h + 2, C'230,230,236');
+      ObjectSetInteger(0, prefix + "_GT", OBJPROP_ZORDER, 2);
+     }
+  }
+
+void HudLine(const string name, const double price, const color clr, const string caption)
+  {
+   if(price <= 0.0)
+     {
+      ObjectDelete(0, name);
+      return;
+     }
+   if(ObjectFind(0, name) < 0)
+      ObjectCreate(0, name, OBJ_HLINE, 0, 0, price);
+   ObjectSetDouble(0, name, OBJPROP_PRICE, price);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DASH);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, name, OBJPROP_BACK, true);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+   ObjectSetString(0, name, OBJPROP_TEXT, caption);
+  }
+
+void DrawEmaSeg(const int i, const datetime tA, const double pA, const datetime tB, const double pB)
+  {
+   const string name = "PBEMA_" + IntegerToString(i);
+   if(ObjectFind(0, name) < 0)
+     {
+      ObjectCreate(0, name, OBJ_TREND, 0, tA, pA, tB, pB);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, C'232,168,48');
+      ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_SOLID);
+      ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, name, OBJPROP_RAY_LEFT, false);
+      ObjectSetInteger(0, name, OBJPROP_BACK, true);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+     }
+   ObjectSetInteger(0, name, OBJPROP_TIME, 0, tA);
+   ObjectSetDouble(0, name, OBJPROP_PRICE, 0, pA);
+   ObjectSetInteger(0, name, OBJPROP_TIME, 1, tB);
+   ObjectSetDouble(0, name, OBJPROP_PRICE, 1, pB);
+  }
+
+void DrawEmaCurve()
+  {
+   if(!ShowEmaOnChart || trendHandle == INVALID_HANDLE)
+      return;
+   const int n = 150;
+   double ma[];
+   ArraySetAsSeries(ma, true);
+   if(CopyBuffer(trendHandle, 0, 0, n, ma) < n)
+      return;
+   const datetime t0 = iTime(_Symbol, SignalTF, 0);
+   const int last = (t0 != emaBarStamp) ? n - 1 : 1;
+   for(int i = 0; i < last; i++)
+     {
+      const datetime ta = iTime(_Symbol, SignalTF, i + 1);
+      const datetime tb = iTime(_Symbol, SignalTF, i);
+      if(ta <= 0 || tb <= 0 || ma[i] <= 0.0 || ma[i + 1] <= 0.0)
+         continue;
+      DrawEmaSeg(i, ta, ma[i + 1], tb, ma[i]);
+     }
+   emaBarStamp = t0;
+   ObjectDelete(0, "PBLINE_EMA");
+  }
+
+void DrawBoard()
+  {
+   DrawEmaCurve();
+   const int panelW = 348;
+   const int panelH = 214;
+   HudRect("PBHUD_BG", 8, 18, panelW, panelH, C'22,22,26');
+   ObjectSetInteger(0, "PBHUD_BG", OBJPROP_COLOR, C'58,58,64');
+   ObjectSetInteger(0, "PBHUD_BG", OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, "PBHUD_BG", OBJPROP_WIDTH, 1);
+
+   const double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double dayDd = 0.0;
+   if(dayStartEquity > 0.0)
+      dayDd = (dayStartEquity - equity) / dayStartEquity * 100.0;
+   string halt = "ok";
+   if(haltedToday)
+      halt = "DAILY HALT";
+   else if(haltedByPython)
+      halt = "PYTHON HALT";
+   else if(!AutoTrade)
+      halt = "HOOK ONLY";
+
+   string posLine = "flat";
+   double entry = 0.0, sl = 0.0, tp = 0.0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      const ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if((int)PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+      const bool isBuy = ((int)PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      sl = PositionGetDouble(POSITION_SL);
+      tp = PositionGetDouble(POSITION_TP);
+      posLine = (isBuy ? "BUY " : "SELL ") +
+                DoubleToString(PositionGetDouble(POSITION_VOLUME), 2) +
+                "   P/L " + DoubleToString(PositionGetDouble(POSITION_PROFIT), 2);
+      break;
+     }
+
+   ObjectDelete(0, "PBHUD_NRL");
+   ObjectDelete(0, "PBHUD_NR_TR");
+   ObjectDelete(0, "PBHUD_NR_FL");
+   ObjectDelete(0, "PBHUD_NR_GT");
+
+   double ema50 = 0, ema50Prev = 0, closeNow = 0, closePrev = 0, atr = 0, er = 0;
+   datetime barTime = 0;
+   const bool ready = H4Values(ema50, ema50Prev, closeNow, closePrev, atr, er, barTime);
+   const bool armed = (ready && er >= ErMin);
+
+   double sigFrac = 0.0;
+   string sigText = "to signal  warming up";
+   color sigFill = C'100,110,150';
+   color sigLbl = C'160,160,168';
+   SignalCloseness(sigFrac, sigText, sigFill, sigLbl);
+
+   HudLabel("PBHUD_T1", 20, 26, 11, C'220,220,224');
+   ObjectSetString(0, "PBHUD_T1", OBJPROP_TEXT, "PythonBridgeEA  1.14   " + (AutoTrade ? "AUTO" : "HOOK"));
+   HudLabel("PBHUD_T2", 20, 46, 9, C'160,160,168');
+   ObjectSetString(0, "PBHUD_T2", OBJPROP_TEXT,
+                   _Symbol + "  H4   risk " + DoubleToString(RiskPercent, 1) + "%   2.5 ATR / 2R");
+   HudLabel("PBHUD_T3", 20, 64, 9, C'200,200,206');
+   ObjectSetString(0, "PBHUD_T3", OBJPROP_TEXT,
+                   "equity " + DoubleToString(equity, 2) +
+                   "   day " + DoubleToString(dayDd, 2) + "% / " + DoubleToString(DailyLossPercent, 0) + "%");
+   HudLabel("PBHUD_T4", 20, 82, 9, (StringFind(halt, "HALT") >= 0) ? C'220,90,90' : C'120,190,130');
+   ObjectSetString(0, "PBHUD_T4", OBJPROP_TEXT, "status  " + halt);
+   HudLabel("PBHUD_T5", 20, 100, 9, C'180,180,186');
+   ObjectSetString(0, "PBHUD_T5", OBJPROP_TEXT, "setup   " + lastStatus);
+   HudLabel("PBHUD_T6", 20, 118, 9, C'200,200,206');
+   ObjectSetString(0, "PBHUD_T6", OBJPROP_TEXT, "trade   " + posLine);
+
+   const int barX = 20;
+   const int barW = 316;
+   HudLabel("PBHUD_ERL", barX, 138, 8, armed ? C'120,190,130' : C'200,150,80');
+   ObjectSetString(0, "PBHUD_ERL", OBJPROP_TEXT,
+                   ready
+                   ? ("last H4 ER  " + DoubleToString(er, 2) + " / 1.00   gate " + DoubleToString(ErMin, 2) +
+                      (armed ? "   ARMED" : "   chop"))
+                   : "last H4 ER  warming up");
+   HudMeter("PBHUD_ER", barX, 154, barW, 10, ready ? er : 0.0, ErMin, armed ? C'70,180,120' : C'200,140,70');
+
+   HudLabel("PBHUD_SGL", barX, 170, 8, sigLbl);
+   ObjectSetString(0, "PBHUD_SGL", OBJPROP_TEXT, sigText);
+   HudMeter("PBHUD_SG", barX, 186, barW, 10, sigFrac, 0.0, sigFill);
+
+   HudLabel("PBHUD_T7", 20, 204, 8, C'120,120,128');
+   ObjectSetString(0, "PBHUD_T7", OBJPROP_TEXT,
+                   AccountInfoString(ACCOUNT_SERVER) + "  " + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)));
+
+   HudLine("PBLINE_EN", entry, C'90,140,220', "entry");
+   HudLine("PBLINE_SL", sl, C'200,80,80', "SL");
+   HudLine("PBLINE_TP", tp, C'70,170,110', "TP");
+   ChartRedraw(0);
+  }
+
 void BridgePump()
   {
    ResetDailyCounters();
+   if(AutoTrade)
+      TryEnter();
    WriteSnapshotFile();
-   Comment("PythonBridgeEA ER-H4\n", lastStatus, "\n", AccountInfoString(ACCOUNT_SERVER),
-           "  ", AccountInfoInteger(ACCOUNT_LOGIN),
-           "\nequity ", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), 2));
+   DrawBoard();
+   Comment("");
 
    string fileCmd = ReadCommandFile();
    if(fileCmd != "")
@@ -267,7 +506,7 @@ string DoOpen(const string json, const string cmd, const string id)
    const double atrMult = JsonNum(json, "atr_stop_mult", ATRStopMult);
    const double rr = JsonNum(json, "reward_ratio", RewardRatio);
 
-   if(sl <= 0.0 || tp <= 0.0)
+   if(sl <= 0.0 || (tp <= 0.0 && rr > 0.0))
      {
       const double atr = CurrentATR(symbol);
       if(atr <= 0.0)
@@ -277,12 +516,12 @@ string DoOpen(const string json, const string cmd, const string id)
       if(type == ORDER_TYPE_BUY)
         {
          if(sl <= 0.0) sl = price - slDist;
-         if(tp <= 0.0) tp = price + tpDist;
+         if(tp <= 0.0 && rr > 0.0) tp = price + tpDist;
         }
       else
         {
          if(sl <= 0.0) sl = price + slDist;
-         if(tp <= 0.0) tp = price - tpDist;
+         if(tp <= 0.0 && rr > 0.0) tp = price - tpDist;
         }
      }
 
@@ -290,7 +529,7 @@ string DoOpen(const string json, const string cmd, const string id)
    tp = NormalizePrice(symbol, tp);
 
    if(volume <= 0.0)
-      volume = VolumeForRisk(symbol, price, sl, (risk > 0.0) ? risk : 0.5);
+      volume = VolumeForRisk(symbol, price, sl, (risk > 0.0) ? risk : RiskPercent);
    if(volume <= 0.0)
       return Result(false, cmd, 0, 0, "volume is 0", id);
    if(volume > MaxVolume)
@@ -382,6 +621,161 @@ bool InSession()
    return (now.day_of_week != 0 && now.day_of_week != 6);
   }
 
+int UsdDirOf(const string symbol, const bool isBuy)
+  {
+   string s = symbol;
+   StringToUpper(s);
+   StringReplace(s, ".", "");
+   StringReplace(s, "_", "");
+   if(StringLen(s) < 6)
+      return 0;
+   const string base = StringSubstr(s, 0, 3);
+   const string quote = StringSubstr(s, 3, 3);
+   if(quote == "USD")
+      return isBuy ? -1 : 1;
+   if(base == "USD")
+      return isBuy ? 1 : -1;
+   return 0;
+  }
+
+int CountUsdDir(const int dir)
+  {
+   if(dir == 0)
+      return 0;
+   int n = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      const ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if((int)PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+         continue;
+      const bool isBuy = ((int)PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      if(UsdDirOf(PositionGetString(POSITION_SYMBOL), isBuy) == dir)
+         n++;
+     }
+   return n;
+  }
+
+int CountEntriesToday()
+  {
+   if(dayStamp <= 0)
+      return 0;
+   if(!HistorySelect(dayStamp, TimeCurrent()))
+      return 0;
+   int n = 0;
+   for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
+     {
+      const ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if((int)HistoryDealGetInteger(ticket, DEAL_MAGIC) != MagicNumber)
+         continue;
+      if(HistoryDealGetString(ticket, DEAL_SYMBOL) != _Symbol)
+         continue;
+      if((int)HistoryDealGetInteger(ticket, DEAL_ENTRY) != DEAL_ENTRY_IN)
+         continue;
+      n++;
+     }
+   return n;
+  }
+
+string SignalSide(string &reason)
+  {
+   double ema50, ema50Prev, closeNow, closePrev, atr, er;
+   datetime barTime;
+   string side = "flat";
+   reason = "no setup";
+   if(!InSession())
+      reason = "weekend";
+   else if(SpreadPoints(_Symbol) > MaxSpreadPoints)
+      reason = "spread too wide";
+   else if(!H4Values(ema50, ema50Prev, closeNow, closePrev, atr, er, barTime))
+      reason = "indicators not ready";
+   else if(er < ErMin)
+      reason = "chop (low efficiency ratio)";
+   else if(closeNow > ema50 && closePrev <= ema50Prev)
+     {
+      side = "buy";
+      reason = "ER trend + close crossed above EMA50";
+     }
+   else if(closeNow < ema50 && closePrev >= ema50Prev)
+     {
+      side = "sell";
+      reason = "ER trend + close crossed below EMA50";
+     }
+   else
+      reason = "efficient trend, no EMA50 cross";
+   return side;
+  }
+
+void TryEnter()
+  {
+   datetime t[];
+   ArraySetAsSeries(t, true);
+   if(CopyTime(_Symbol, SignalTF, 0, 1, t) < 1)
+      return;
+   if(lastBarTime == 0)
+     {
+      lastBarTime = t[0];
+      return;
+     }
+   if(t[0] == lastBarTime)
+      return;
+   lastBarTime = t[0];
+
+   if(DemoBlocked() || haltedByPython || DailyLossHit())
+      return;
+   if(!MQLInfoInteger(MQL_TRADE_ALLOWED) || !TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+      return;
+   if(CountMagicPositions(_Symbol) >= MaxOpenPositions)
+      return;
+   if(CountMagicPositions("") >= MaxAccountPositions)
+      return;
+   if(CountEntriesToday() >= MaxTradesPerDay)
+      return;
+   if(SpreadPoints(_Symbol) > MaxSpreadPoints)
+      return;
+
+   string reason;
+   const string side = SignalSide(reason);
+   lastStatus = reason;
+   if(side != "buy" && side != "sell")
+      return;
+
+   const int dir = UsdDirOf(_Symbol, side == "buy");
+   if(dir != 0 && CountUsdDir(dir) >= MaxUsdDir)
+     {
+      lastStatus = "usd cap";
+      return;
+     }
+
+   const double atr = CurrentATR(_Symbol);
+   if(atr <= 0.0)
+      return;
+   const double price = (side == "buy") ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   const double slDist = atr * ATRStopMult;
+   double sl = (side == "buy") ? price - slDist : price + slDist;
+   double tp = 0.0;
+   if(RewardRatio > 0.0)
+      tp = (side == "buy") ? price + slDist * RewardRatio : price - slDist * RewardRatio;
+   sl = NormalizePrice(_Symbol, sl);
+   if(tp > 0.0)
+      tp = NormalizePrice(_Symbol, tp);
+   const double volume = VolumeForRisk(_Symbol, price, sl, RiskPercent);
+   if(volume <= 0.0 || volume > MaxVolume)
+      return;
+
+   trade.SetExpertMagicNumber(MagicNumber);
+   const bool ok = (side == "buy")
+                   ? trade.Buy(volume, _Symbol, price, sl, tp, "ea-er-h4")
+                   : trade.Sell(volume, _Symbol, price, sl, tp, "ea-er-h4");
+   if(ok)
+      lastStatus = "opened " + side;
+   else
+      lastStatus = "entry failed " + trade.ResultRetcodeDescription();
+  }
+
 double EfficiencyRatio(const int period, const int shift)
   {
    const double c0 = iClose(_Symbol, SignalTF, shift);
@@ -424,32 +818,122 @@ bool H4Values(double &ema50, double &ema50Prev, double &closeNow, double &closeP
    return true;
   }
 
-string SignalResponse(const string id)
+bool H4Forming(double &ema50, double &ema50Prev, double &closeNow, double &closePrev, double &atr, double &er)
   {
+   ema50 = ema50Prev = closeNow = closePrev = atr = er = 0.0;
+   double ma[], at[];
+   ArraySetAsSeries(ma, true);
+   ArraySetAsSeries(at, true);
+   if(CopyBuffer(trendHandle, 0, 0, 3, ma) < 3) return false;
+   if(CopyBuffer(atrHandle, 0, 0, 2, at) < 2) return false;
+   closeNow = iClose(_Symbol, SignalTF, 0);
+   closePrev = iClose(_Symbol, SignalTF, 1);
+   if(closeNow <= 0.0 || closePrev <= 0.0) return false;
+   ema50 = ma[0];
+   ema50Prev = ma[1];
+   atr = at[0];
+   if(atr <= 0.0)
+      atr = at[1];
+   er = EfficiencyRatio(ErPeriod, 0);
+   return (ema50 > 0.0 && atr > 0.0);
+  }
+
+string MinutesLeftH4()
+  {
+   const datetime open = iTime(_Symbol, SignalTF, 0);
+   if(open <= 0)
+      return "";
+   int sec = (int)(PeriodSeconds(SignalTF) - (TimeCurrent() - open));
+   if(sec < 0)
+      sec = 0;
+   return IntegerToString(sec / 3600) + "h" + IntegerToString((sec % 3600) / 60) + "m";
+  }
+
+void SignalCloseness(double &frac, string &text, color &fill, color &labelClr)
+  {
+   frac = 0.0;
+   fill = C'100,110,150';
+   labelClr = C'160,160,168';
+   text = "to signal  warming up";
+
    double ema50, ema50Prev, closeNow, closePrev, atr, er;
-   datetime barTime;
-   string side = "flat";
-   string reason = "no setup";
+   if(!H4Forming(ema50, ema50Prev, closeNow, closePrev, atr, er))
+      return;
+
+   const double erPart = MathMax(0.0, MathMin(1.0, er / ErMin));
+   const bool wantBuy = (closePrev <= ema50Prev);
+   const bool wantSell = (closePrev >= ema50Prev);
+   double buyPart = 0.0;
+   double sellPart = 0.0;
+   if(wantBuy)
+      buyPart = (closeNow > ema50) ? 1.0 : 1.0 - MathMin(MathAbs(ema50 - closeNow) / atr, 1.0);
+   if(wantSell)
+      sellPart = (closeNow < ema50) ? 1.0 : 1.0 - MathMin(MathAbs(closeNow - ema50) / atr, 1.0);
+
+   const bool buyCross = (wantBuy && closeNow > ema50);
+   const bool sellCross = (wantSell && closeNow < ema50);
+   const double crossPart = MathMax(buyPart, sellPart);
+   const bool crossed = (buyCross || sellCross);
+   const string crossSide = (buyPart >= sellPart) ? "buy" : "sell";
+   frac = MathMin(erPart, crossPart);
+
+   const string eta = MinutesLeftH4();
+   string wait = "";
+   if(erPart < 1.0 && !crossed)
+      wait = "need ER " + DoubleToString(er, 2) + "/" + DoubleToString(ErMin, 2) +
+             " + " + DoubleToString(1.0 - crossPart, 2) + " ATR " + crossSide;
+   else if(erPart < 1.0)
+      wait = "need ER " + DoubleToString(er, 2) + "/" + DoubleToString(ErMin, 2) + " (cross ok)";
+   else if(!crossed)
+      wait = DoubleToString(1.0 - crossPart, 2) + " ATR to " + crossSide + " cross";
+   else
+      wait = "READY  fires in " + eta;
+
+   string block = "";
    if(!InSession())
-      reason = "weekend";
+      block = "weekend";
+   else if(haltedToday || DailyLossHit())
+      block = "daily halt";
+   else if(haltedByPython)
+      block = "python halt";
+   else if(!AutoTrade)
+      block = "hook only";
+   else if(CountMagicPositions(_Symbol) >= MaxOpenPositions)
+      block = "already in";
+   else if(CountEntriesToday() >= MaxTradesPerDay)
+      block = "1 per day";
+   else if(CountMagicPositions("") >= MaxAccountPositions)
+      block = "account cap";
    else if(SpreadPoints(_Symbol) > MaxSpreadPoints)
-      reason = "spread too wide";
-   else if(!H4Values(ema50, ema50Prev, closeNow, closePrev, atr, er, barTime))
-      reason = "indicators not ready";
-   else if(er < ErMin)
-      reason = "chop (low efficiency ratio)";
-   else if(closeNow > ema50 && closePrev <= ema50Prev)
+      block = "spread";
+
+   if(crossed && erPart >= 1.0)
      {
-      side = "buy";
-      reason = "ER trend + close crossed above EMA50";
-     }
-   else if(closeNow < ema50 && closePrev >= ema50Prev)
-     {
-      side = "sell";
-      reason = "ER trend + close crossed below EMA50";
+      if(block != "")
+        {
+         text = "to signal  100%  blocked: " + block;
+         fill = C'200,140,70';
+         labelClr = C'200,150,80';
+        }
+      else
+        {
+         text = "to signal  100%  " + wait;
+         fill = C'70,180,120';
+         labelClr = C'120,190,130';
+        }
      }
    else
-      reason = "efficient trend, no EMA50 cross";
+     {
+      text = "to signal  " + IntegerToString((int)MathRound(frac * 100)) + "%  " + wait + "  " + eta;
+      fill = (erPart >= 1.0) ? C'90,140,220' : C'200,140,70';
+      labelClr = (erPart >= 1.0) ? C'140,170,220' : C'200,150,80';
+     }
+  }
+
+string SignalResponse(const string id)
+  {
+   string reason;
+   const string side = SignalSide(reason);
    return "{\"ok\":true,\"cmd\":\"signal\",\"id\":\"" + JsonEscape(id) +
           "\",\"side\":\"" + side +
           "\",\"reason\":\"" + JsonEscape(reason) +
@@ -537,6 +1021,7 @@ string SnapshotJson()
           ",\"leverage\":" + IntegerToString(AccountInfoInteger(ACCOUNT_LEVERAGE)) +
           ",\"positions_total\":" + IntegerToString(CountMagicPositions(_Symbol)) +
           ",\"positions_account\":" + IntegerToString(CountMagicPositions("")) +
+          ",\"auto_trade\":" + (AutoTrade ? "true" : "false") +
           ",\"halted_daily\":" + (DailyLossHit() ? "true" : "false") +
           ",\"halted_python\":" + (haltedByPython ? "true" : "false") +
           ",\"algo_allowed\":" + ((MQLInfoInteger(MQL_TRADE_ALLOWED) && TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) ? "true" : "false") +

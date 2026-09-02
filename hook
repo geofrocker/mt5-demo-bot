@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OS-aware launcher. Python auto-detects Windows vs macOS for paths, install, and the daemon.
+# OS-aware launcher. Python auto-detects Windows vs macOS for paths and install.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 if [[ "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* || -n "${WINDIR:-}" ]]; then

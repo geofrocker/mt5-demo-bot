@@ -37,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("scan", help="Walk-forward majors and rewrite config/enabled.json")
     sub.add_parser("paths", help="Show MT5 Common Files and data-folder paths")
     sub.add_parser("install", help="Copy and compile PythonBridgeEA into the local MT5 data folder")
-    manage = sub.add_parser("manage", help="Run the 24/7 manager in the foreground")
+    manage = sub.add_parser("manage", help="Retired; EA AutoTrade owns entries")
     manage.add_argument("--interval", type=int, default=20, help="seconds between ticks")
     manage.add_argument("--no-sleep", action="store_true", help="prevent idle sleep (caffeinate on macOS, SetThreadExecutionState on Windows)")
     manage.add_argument("--caffeinate", action="store_true", help="alias for --no-sleep")
@@ -51,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--volume", type=float, default=0.0, help="0 = size from risk")
         p.add_argument("--sl", type=float, default=0.0)
         p.add_argument("--tp", type=float, default=0.0)
-        p.add_argument("--risk", type=float, default=0.5, help="percent of equity")
+        p.add_argument("--risk", type=float, default=1.0, help="percent of equity")
         p.add_argument("--comment", default="python-hook")
 
     close = sub.add_parser("close", help="Close one ticket")

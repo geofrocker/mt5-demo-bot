@@ -1,5 +1,5 @@
 @echo off
-REM OS-aware launcher. Python auto-detects Windows vs macOS for paths, install, and the daemon.
+REM OS-aware launcher. Python auto-detects Windows vs macOS for paths and install.
 setlocal EnableExtensions
 set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"

@@ -1,40 +1,40 @@
 # MT5 demo bot
 
-Python control of a **MetaTrader 5 demo** account. It is not a human fund manager, not financial advice, and it will not print money.
+**PythonBridgeEA** trades a **MetaTrader 5 demo** account on its own. It is not a human fund manager, not financial advice, and it will not print money.
 
-The same Python hook auto-detects the OS:
-
-- **Windows:** native MT5, Common Files under `%APPDATA%`, Task Scheduler daemon
-- **macOS:** Wine-wrapped MT5, Common Files under `~/Library/Application Support`, LaunchAgent daemon
+Python is optional (status, halt, install, scan). Do **not** run the old Python manager alongside the EA.
 
 Keep MT5 open with **Algo Trading** enabled. If the terminal is closed, nothing trades.
 
 ```
-this chat / hook
-    -> python/mt5_hook
-        -> MT5 Common Files drop
-            -> PythonBridgeEA on each enabled chart
-                -> demo account
+PythonBridgeEA on EURUSD, USDCAD, EURJPY H4
+    -> demo account
+optional: hook.cmd status / halt
 ```
-
-Do **not** attach `ConservativeTrendEA` at the same time as `PythonBridgeEA`. One boss only.
 
 ## Strategy
 
-One engine: **Kaufman efficiency ratio + EMA50 close cross on H4**. Stops are **2.5×ATR** (vol-normalized), target **2R**, one entry per symbol per day.
+Entry: **Kaufman efficiency ratio + EMA50 close cross on H4**. One entry per symbol per day.
 
-`config/enabled.json` lists which majors passed the walk-forward gates. The manager only trades those. Pairs that fail (GBPUSD on this rule) stay off. Re-run `hook scan` (see commands below).
+Exit (set at fill, then left alone):
+
+- Initial stop **2.5×ATR**
+- Take profit **2R**
+- Risk **1.0%** of equity per trade (0.10 lot cap still applies)
+- No trailing stop, no breakeven move, no scale-out
+
+`config/enabled.json` is the research enable-list. Attach the EA only on those symbols. Re-run `hook scan` after strategy changes.
 
 ## Safety rails (enforced in the EA)
 
 - Demo accounts only (`RequireDemo=true`)
 - Max **0.10** lots per order
-- Max **1** position per symbol, **3** hook-managed positions on the account
+- Max **1** position per symbol, **3** magic positions on the account
+- Max **2** same-way USD positions
 - Halt after **2%** daily equity drawdown
-- Shared token `demo-local-hook` (localhost only)
+- `AutoTrade=true` by default
+- Shared token `demo-local-hook` (localhost only, optional hook)
 - No martingale, no grid, no averaging down
-
-The manager also caps **two same-way USD** positions (so you do not stack EURUSD+GBPUSD+AUDUSD shorts as one USD bet).
 
 ## Setup
 
@@ -61,42 +61,27 @@ Typical Experts paths:
 - Windows: `%APPDATA%\MetaQuotes\Terminal\<id>\MQL5\Experts\`
 - macOS: `~/Library/Application Support/net.metaquotes.wine.metatrader5/drive_c/Program Files/MetaTrader 5/MQL5/Experts/`
 
-Then in MT5: Navigator → Experts → Refresh, attach **PythonBridgeEA** to **each enabled symbol** (H4 chart), enable **Algo Trading**. Leave **EnableTcp=false** when more than one chart is attached.
+Then in MT5: Navigator → Experts → Refresh, **reattach** **PythonBridgeEA** to **each enabled symbol** (H4 chart) so `RiskPercent=1.0` and the v1.11 HUD meters load, enable **Algo Trading**. Leave **EnableTcp=false** when more than one chart is attached.
 
-## 24/7 manager
+The on-chart panel has two meters. **Last H4 ER** is the closed candle the entry uses (white tick at 0.40; green = armed, amber = chop). **To signal** is a live forming-H4 countdown: fill is the weaker of ER-to-gate and distance-to-EMA50-cross. 100% green means both conditions are true on the current H4 and it will evaluate when that bar closes (unless the label says blocked).
 
-`daemon-install` picks the host OS:
+## 24/7
 
-- **Windows:** Task Scheduler job `mt5-demo-manager` (restarts on crash, `SetThreadExecutionState` against idle sleep)
-- **macOS:** LaunchAgent `com.mt5-demo-bot.manager` wrapped in `caffeinate -i`
+The EA is the manager. No Python daemon. For always-on trading, keep MT5 running (this PC awake, or MQL5 VPS / a Windows VPS later).
 
-Every 20 seconds it:
-
-- Manages open trades (breakeven at 1R, trail at 1.5R)
-- Asks each attached EA for the H4 signal and enters only if the enable-list, session, daily cap, portfolio slot, and USD cap allow it
-- Never martingales or stacks losers
-
-This is **not** a cloud robot. It needs the machine **awake**, **MT5 running**, and **PythonBridgeEA** attached with Algo Trading on.
-
-**Windows:**
+Remove a leftover Python task:
 
 ```bat
-hook.cmd daemon-install
 hook.cmd daemon-uninstall
-hook.cmd manage --interval 20 --no-sleep
 ```
 
-**macOS:**
+Python is still useful for:
 
-```bash
-./hook daemon-install
-./hook daemon-uninstall
-./hook manage --interval 20 --no-sleep
+```bat
+hook.cmd status --symbol EURUSD
+hook.cmd halt
+hook.cmd scan
 ```
-
-Logs: `logs/manager.log`
-
-Lid/sleep still pauses trading. Plug in and turn off sleep for overnight runs.
 
 ## Commands
 
@@ -109,7 +94,7 @@ scan
 status
 status --symbol EURUSD
 signal --symbol EURUSD
-buy EURUSD --risk 0.5
+buy EURUSD --risk 1.0
 halt
 resume
 close-all

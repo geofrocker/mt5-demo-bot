@@ -1,6 +1,6 @@
 {
   "strategy": "er_ema50_h4",
-  "updated": "2026-09-01T13:20:47Z",
+  "updated": "2026-09-01T18:20:00Z",
   "gates": {
     "is_pnl": 0.0,
     "oos_pnl": 0.0,
@@ -9,7 +9,7 @@
     "full_n": 20,
     "oos_dd": 15.0
   },
-  "risk_percent": 0.5,
+  "risk_percent": 1.0,
   "max_positions": 3,
   "max_usd_dir": 2,
   "enabled": [

@@ -28,9 +28,12 @@ GATES = {
     "oos_dd": 15.0,
 }
 
+ATR_STOP_MULT = 2.5
+TRAIL_ATR_MULT = 0.0
+REWARD_RATIO = 2.0
 MAX_POSITIONS = 3
 MAX_USD_DIR = 2
-RISK_PERCENT = 0.5
+RISK_PERCENT = 1.0
 WARMUP = 80
 
 
@@ -80,7 +83,7 @@ def _usd_ok(open_pos: Dict[str, dict], symbol: str, side: str) -> bool:
     return same < MAX_USD_DIR
 
 
-def simulate_portfolio(books: Dict[str, dict]) -> dict:
+def simulate_portfolio(books: Dict[str, dict], risk_percent: float = RISK_PERCENT) -> dict:
     """Shared equity, 0.5% risk, max 3 books, max 2 same-way USD."""
     groups: Dict[datetime, List[Tuple[str, int]]] = defaultdict(list)
     for symbol, book in books.items():
@@ -137,6 +140,24 @@ def simulate_portfolio(books: Dict[str, dict]) -> dict:
             dd = max(dd, (peak - equity) / peak * 100)
 
         for symbol, i in groups[ts]:
+            pos = open_pos.get(symbol)
+            if not pos:
+                continue
+            book = books[symbol]
+            if TRAIL_ATR_MULT <= 0:
+                continue
+            atr_v = book.get("atr") or []
+            a = atr_v[i] if i < len(atr_v) and atr_v[i] else None
+            if not a:
+                continue
+            if pos["side"] == "buy":
+                pos["peak"] = max(float(pos.get("peak") or pos["entry"]), book["h"][i])
+                pos["sl"] = max(pos["sl"], pos["peak"] - TRAIL_ATR_MULT * a)
+            else:
+                pos["trough"] = min(float(pos.get("trough") or pos["entry"]), book["l"][i])
+                pos["sl"] = min(pos["sl"], pos["trough"] + TRAIL_ATR_MULT * a)
+
+        for symbol, i in groups[ts]:
             if symbol in open_pos:
                 continue
             book = books[symbol]
@@ -155,15 +176,17 @@ def simulate_portfolio(books: Dict[str, dict]) -> dict:
                 continue
             atr_v = book["atr"]
             a = atr_v[i - 1] if atr_v and atr_v[i - 1] else (book["h"][i] - book["l"][i])
-            dist = max(a * 2.5, book["pip"] * 8)
-            vol = lots(equity, dist, book["pip"])
+            dist = max(a * ATR_STOP_MULT, book["pip"] * 8)
+            vol = lots(equity, dist, book["pip"], risk_percent=risk_percent)
             if vol <= 0:
                 continue
             spread = book["spread"]
             o = book["o"][i]
             entry = o + spread / 2 if side == "buy" else o - spread / 2
             sl = entry - dist if side == "buy" else entry + dist
-            tp = entry + dist * 2.0 if side == "buy" else entry - dist * 2.0
+            tp = None
+            if REWARD_RATIO > 0:
+                tp = entry + dist * REWARD_RATIO if side == "buy" else entry - dist * REWARD_RATIO
             open_pos[symbol] = {
                 "symbol": symbol,
                 "side": side,
@@ -172,6 +195,8 @@ def simulate_portfolio(books: Dict[str, dict]) -> dict:
                 "tp": tp,
                 "lots": vol,
                 "tm": ts.strftime("%Y-%m-%d %H:%M"),
+                "peak": entry,
+                "trough": entry,
             }
             day_count[symbol] = (day, count + 1)
 

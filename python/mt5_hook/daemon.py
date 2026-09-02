@@ -16,16 +16,8 @@ MAC_LABEL = "com.mt5-demo-bot.manager"
 def install() -> None:
     kind = paths.host_os()
     print(f"Detected OS: {kind}")
-    if kind == "windows":
-        _install_windows()
-        return
-    if kind == "macos":
-        _install_macos()
-        return
-    raise RuntimeError(
-        f"No background manager for {kind}. Run in the foreground: "
-        f"{paths.hook_command()} manage --interval 20 --no-sleep"
-    )
+    print("Python manager is retired. PythonBridgeEA AutoTrade=true runs entries and exits inside MT5.")
+    print("Not installing a background Python task. Use hook.cmd daemon-uninstall to remove an old one.")
 
 
 def uninstall() -> None:
